@@ -50,7 +50,7 @@
 
 // Properties
 @synthesize url, request, delegate;
-@synthesize urlConnection, asyncData, asyncTextEncodingName, connectionType;
+@synthesize urlTask;
 @synthesize feedParseType, feedParser, currentPath, currentText, currentElementAttributes, item, info;
 @synthesize pathOfElementWithXHTMLType;
 @synthesize stopped, failed, parsing;
@@ -63,7 +63,6 @@
 
 		// Defaults
 		feedParseType = ParseTypeFull;
-		connectionType = ConnectionTypeSynchronously;
 		
 		// Date Formatters
 		// Good info on internet dates here: http://developer.apple.com/iphone/library/qa/qa2010/qa1480.html
@@ -115,9 +114,7 @@
 // Reset data variables before processing
 // Exclude parse state variables as they are needed after parse
 - (void)reset {
-	self.asyncData = nil;
-	self.asyncTextEncodingName = nil;
-	self.urlConnection = nil;
+	self.urlTask = nil;
 	feedType = FeedTypeUnknown;
 	self.currentPath = @"/";
 	self.currentText = [[NSMutableString alloc] init];
@@ -147,45 +144,35 @@
 	stopped = NO;
 	failed = NO;
 	parsingComplete = NO;
-	
-	// Start
-	BOOL success = YES;
     
 	// Debug Log
 	MWLog(@"MWFeedParser: Connecting & downloading feed data");
-	
-	// Connection
-	if (connectionType == ConnectionTypeAsynchronously) {
-		
-		// Async
-		urlConnection = [[NSURLConnection alloc] initWithRequest:self.request delegate:self];
-		if (urlConnection) {
-			asyncData = [[NSMutableData alloc] init];// Create data
-		} else {
-			[self parsingFailedWithErrorCode:MWErrorCodeConnectionFailed 
-							  andDescription:[NSString stringWithFormat:@"Asynchronous connection failed to URL: %@", url]];
-			success = NO;
-		}
-		
-	} else {
-	
-		// Sync
-		NSURLResponse *response = nil;
-		NSError *error = nil;
-		NSData *data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
-		if (data && !error) {
-			[self startParsingData:data textEncodingName:[response textEncodingName]]; // Process
-		} else {
-			[self parsingFailedWithErrorCode:MWErrorCodeConnectionFailed 
-							  andDescription:[NSString stringWithFormat:@"Synchronous connection failed to URL: %@", url]];
-			success = NO;
-		}
-		
-	}
-	
-	// Cleanup & return
-	return success;
-	
+    
+    NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration defaultSessionConfiguration];
+    sessionConfiguration.URLCache = nil;
+    
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfiguration];
+    urlTask = [session dataTaskWithRequest:self.request completionHandler:^(NSData * __nullable data, NSURLResponse * __nullable response, NSError * __nullable error) {
+        if (data && !error) {
+            // Succeed
+            MWLog(@"MWFeedParser: Connection successful... received %d bytes of data", [data length]);
+            
+            // Parse
+            if (!stopped) [self startParsingData:data textEncodingName:[response textEncodingName]];
+            
+            // Cleanup
+            self.urlTask = nil;
+        } else {
+            // Failed
+            self.urlTask = nil;
+            
+            // Error
+            [self parsingFailedWithErrorCode:MWErrorCodeConnectionFailed andDescription:[error localizedDescription]];
+        }
+    }];
+    [urlTask resume];
+    
+    return YES;
 }
 
 // Begin XML parsing
@@ -302,10 +289,8 @@
 		stopped = YES;
 		
 		// Stop downloading
-		[urlConnection cancel];
-		self.urlConnection = nil;
-		self.asyncData = nil;
-		self.asyncTextEncodingName = nil;
+		[urlTask cancel];
+		self.urlTask = nil;
 		
 		// Abort
 		aborted = YES;
@@ -370,49 +355,6 @@
 		
 	}
 	
-}
-
-#pragma mark -
-#pragma mark NSURLConnection Delegate (Async)
-
-- (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response {
-	[asyncData setLength:0];
-	self.asyncTextEncodingName = [response textEncodingName];
-}
-
-- (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
-	[asyncData appendData:data];
-}
-
-- (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
-	
-	// Failed
-	self.urlConnection = nil;
-	self.asyncData = nil;
-	self.asyncTextEncodingName = nil;
-	
-    // Error
-	[self parsingFailedWithErrorCode:MWErrorCodeConnectionFailed andDescription:[error localizedDescription]];
-	
-}
-
-- (void)connectionDidFinishLoading:(NSURLConnection *)connection {
-	
-	// Succeed
-	MWLog(@"MWFeedParser: Connection successful... received %d bytes of data", [asyncData length]);
-	
-	// Parse
-	if (!stopped) [self startParsingData:asyncData textEncodingName:self.asyncTextEncodingName];
-	
-    // Cleanup
-    self.urlConnection = nil;
-    self.asyncData = nil;
-	self.asyncTextEncodingName = nil;
-
-}
-
--(NSCachedURLResponse *)connection:(NSURLConnection *)connection willCacheResponse:(NSCachedURLResponse *)cachedResponse {
-	return nil; // Don't cache
 }
 
 #pragma mark -
